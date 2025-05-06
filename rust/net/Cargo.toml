@@ -1,0 +1,90 @@
+[package]
+name = "libsignal-net"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+authors.workspace = true
+license.workspace = true
+
+[features]
+test-util = []
+
+[lints]
+workspace = true
+
+[dependencies]
+libsignal-net-infra = { path = "infra" }
+
+attest = { workspace = true }
+libsignal-core = { workspace = true }
+libsignal-keytrans = { workspace = true }
+libsignal-protocol = { workspace = true }
+zkgroup = { workspace = true }
+
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bincode = { workspace = true }
+bytes = { workspace = true }
+const-str = { workspace = true }
+derive-where = { workspace = true }
+derive_more = { workspace = true, features = ["debug", "from"] }
+displaydoc = { workspace = true }
+either = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+http = { workspace = true }
+itertools = { workspace = true }
+log = { workspace = true }
+nonzero_ext = { workspace = true }
+num_enum = { workspace = true }
+pin-project = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = { workspace = true }
+scopeguard = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_with = { workspace = true, features = ["base64"] }
+sha2 = { workspace = true }
+snow = { workspace = true }
+static_assertions = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "macros"] }
+tokio-boring-signal = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = { workspace = true, features = ["url"] }
+url = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+visibility = { workspace = true }
+zerocopy = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+
+[dev-dependencies]
+libsignal-net = { path = ".", features = ["test-util"] }
+libsignal-net-infra = { path = "infra", features = ["test-util"] }
+
+assert_matches = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+env_logger = { workspace = true }
+pretty_assertions = { workspace = true }
+rand_chacha = { workspace = true }
+snow = { workspace = true, features = ["default-resolver"] }
+test-case = { workspace = true }
+test-log = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "io-std", "rt-multi-thread"] }
+warp = { workspace = true, features = ["tls"] }
+
+[[example]]
+name = "chat_smoke_test"
+required-features = ["test-util"]
+
+[[test]]
+name = "chat_connect_timing"
+required-features = ["test-util"]
