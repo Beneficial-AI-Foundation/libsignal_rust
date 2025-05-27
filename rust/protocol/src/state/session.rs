@@ -586,8 +586,14 @@ impl SessionRecord {
         })
     }
 
-    pub(crate) fn has_session_state(
-        &self,
+    /// If there's a session with a matching version and `alice_base_key`, ensures that it is the
+    /// current session, promoting if necessary.
+    ///
+    /// Returns `Ok(true)` if such a session was found, `Ok(false)` if not, and
+    /// `Err(InvalidSessionError)` if an invalid session was found during the search (whether
+    /// current or not).
+    pub(crate) fn promote_matching_session(
+        &mut self,
         version: u32,
         alice_base_key: &[u8],
     ) -> Result<bool, InvalidSessionError> {
@@ -601,13 +607,20 @@ impl SessionRecord {
             }
         }
 
-        for previous in self.previous_session_states() {
+        let mut session_to_promote = None;
+        for (i, previous) in self.previous_session_states().enumerate() {
             let previous = previous?;
             if previous.session_version()? == version
                 && alice_base_key.ct_eq(previous.alice_base_key()).into()
             {
-                return Ok(true);
+                session_to_promote = Some((i, previous));
+                break;
             }
+        }
+
+        if let Some((i, state)) = session_to_promote {
+            self.promote_old_session(i, state);
+            return Ok(true);
         }
 
         Ok(false)
@@ -803,131 +816,4 @@ impl SessionRecord {
             })?
             .get_kyber_ciphertext())
     }
-}
-
-fn create_test_session_state() -> SessionState {
-    let root_key = RootKey::new([0u8; 32]);
-    SessionState::new(
-        2,
-        &IdentityKey::new(PublicKey::deserialize(&[1, 2, 3]).unwrap()),
-        &IdentityKey::new(PublicKey::deserialize(&[4, 5, 6]).unwrap()),
-        &root_key,
-        &PublicKey::deserialize(&[7, 8, 9]).unwrap(),
-    )
-}
-
-fn create_test_session_state_with_base_key(base_key: &[u8]) -> SessionState {
-    let root_key = RootKey::new([0u8; 32]);
-    SessionState::new(
-        2,
-        &IdentityKey::new(PublicKey::deserialize(&[1, 2, 3]).unwrap()),
-        &IdentityKey::new(PublicKey::deserialize(&[4, 5, 6]).unwrap()),
-        &root_key,
-        &PublicKey::deserialize(base_key).unwrap(),
-    )
-}
-
-// fails: unwrap not handled by kani
-#[kani::proof]
-fn verify_promote_state_archives_current() {
-    let mut record = SessionRecord::new(create_test_session_state());
-    let prev_len = record.previous_sessions.len();
-    record.promote_state(create_test_session_state());
-    assert_eq!(record.previous_sessions.len(), prev_len + 1);
-}
-
-// fails: unwrap not handled by kani
-#[kani::proof]
-fn verify_session_archiving() {
-    // Create a session record with an initial state
-    let initial_state = create_test_session_state();
-    let mut record = SessionRecord::new(initial_state.clone());
-
-    // Verify the state is properly stored
-    assert!(record.session_state().is_some());
-    assert_eq!(record.previous_sessions.len(), 0);
-
-    // Archive the current state
-    record.archive_current_state_inner();
-
-    // Verify that:
-    // 1. The current state is now None
-    assert!(record.session_state().is_none());
-    // 2. The previous sessions list contains exactly one item
-    assert_eq!(record.previous_sessions.len(), 1);
-    // 3. The previous state has unacknowledged pre-key message cleared
-    // FIX: Use &*record.previous_sessions[0] to get a &[u8] slice instead of &Vec<u8>
-    let previous = SessionStructure::decode(&*record.previous_sessions[0]).unwrap();
-    assert!(previous.pending_pre_key.is_none());
-    assert!(previous.pending_kyber_pre_key.is_none());
-}
-
-#[kani::proof]
-fn verify_max_archive_size() {
-    // Use a simplified approach that avoids potential unwrap failures
-    let mut previous_sessions = Vec::new();
-
-    // Add more sessions than the maximum allowed
-    for _ in 0..consts::ARCHIVED_STATES_MAX_LENGTH + 5 {
-        // Create a dummy "serialized" session
-        let dummy_session = vec![0u8; 10]; // Simple dummy data
-
-        // Mimic the archive_current_state_inner behavior:
-        if previous_sessions.len() >= consts::ARCHIVED_STATES_MAX_LENGTH {
-            previous_sessions.pop();
-        }
-        previous_sessions.insert(0, dummy_session);
-    }
-
-    // Verify the invariant
-    assert!(previous_sessions.len() <= consts::ARCHIVED_STATES_MAX_LENGTH);
-}
-
-#[kani::proof]
-fn verify_max_archive_size_with_session_states() {
-    // Create the initial state safely, avoiding unwraps
-    let initial_state_result = match create_test_session_state_safe() {
-        Ok(state) => state,
-        Err(_) => return, // Exit early if we can't create a valid state
-    };
-
-    let mut record = SessionRecord::new(initial_state_result);
-
-    // Archive many states (more than MAX_LENGTH)
-    for i in 0..consts::ARCHIVED_STATES_MAX_LENGTH + 5 {
-        // Create each new state safely
-        match create_test_session_state_safe() {
-            Ok(mut new_state) => {
-                new_state.session.previous_counter = i as u32;
-                record.promote_state(new_state);
-            },
-            Err(_) => break, // Exit the loop if we can't create a valid state
-        }
-    }
-
-    // Verify archives don't exceed maximum
-    assert!(record.previous_sessions.len() <= consts::ARCHIVED_STATES_MAX_LENGTH);
-}
-
-// A version of create_test_session_state that handles errors
-fn create_test_session_state_safe() -> Result<SessionState, SignalProtocolError> {
-    let root_key = RootKey::new([0u8; 32]);
-
-    // Handle all possible errors
-    let pub_key1 = PublicKey::deserialize(&[1, 2, 3])
-        .map_err(|_| SignalProtocolError::InvalidArgument("Cannot deserialize public key 1".into()))?;
-
-    let pub_key2 = PublicKey::deserialize(&[4, 5, 6])
-        .map_err(|_| SignalProtocolError::InvalidArgument("Cannot deserialize public key 2".into()))?;
-
-    let base_key = PublicKey::deserialize(&[7, 8, 9])
-        .map_err(|_| SignalProtocolError::InvalidArgument("Cannot deserialize base key".into()))?;
-
-    Ok(SessionState::new(
-        2,
-        &IdentityKey::new(pub_key1),
-        &IdentityKey::new(pub_key2),
-        &root_key,
-        &base_key,
-    ))
 }

@@ -131,7 +131,7 @@ impl TransportConnector for DirectConnector {
         )
         .await?;
 
-        let ssl_stream = connect_tls(tcp_stream, connection_params, alpn, log_tag).await?;
+        let ssl_stream = connect_tls(tcp_stream, connection_params, alpn, None, log_tag).await?;
 
         Ok(StreamAndInfo(ssl_stream, remote_address))
     }
@@ -157,12 +157,24 @@ impl Connector<TcpRoute<IpAddr>, ()> for StatelessTcp {
         &self,
         (): (),
         route: TcpRoute<IpAddr>,
-        _log_tag: Arc<str>,
+        log_tag: Arc<str>,
     ) -> impl Future<Output = Result<Self::Connection, Self::Error>> {
         let TcpRoute { address, port } = route;
 
-        TcpStream::connect((address, port.get()))
-            .map_err(|_e| TransportConnectError::TcpConnectionFailed)
+        async move {
+            let start = tokio::time::Instant::now();
+            tokio::time::timeout(
+                crate::timeouts::TCP_CONNECTION_TIMEOUT,
+                TcpStream::connect((address, port.get())),
+            )
+            .await
+            .map_err(|_| {
+                let elapsed = tokio::time::Instant::now() - start;
+                log::warn!("{log_tag}: TCP connection timed out after {elapsed:?}");
+                TransportConnectError::TcpConnectionFailed
+            })?
+            .map_err(|_| TransportConnectError::TcpConnectionFailed)
+        }
     }
 }
 
@@ -184,10 +196,11 @@ where
             root_certs,
             sni,
             alpn,
+            min_protocol_version,
         } = fragment;
         let host = sni;
 
-        let ssl_config = ssl_config(&root_certs, host.as_deref(), alpn);
+        let ssl_config = ssl_config(&root_certs, host.as_deref(), alpn, min_protocol_version);
 
         async move {
             let domain = match &host {
@@ -213,12 +226,14 @@ fn ssl_config(
     certs: &RootCertificates,
     host: Host<&str>,
     alpn: Option<Alpn>,
+    min_required_tls_version: Option<boring_signal::ssl::SslVersion>,
 ) -> Result<ConnectConfiguration, TransportConnectError> {
     let mut ssl = SslConnector::builder(SslMethod::tls_client())?;
     certs.apply_to_connector(&mut ssl, host)?;
     if let Some(alpn) = alpn {
         ssl.set_alpn_protos(alpn.as_ref())?;
     }
+    ssl.set_min_proto_version(min_required_tls_version)?;
 
     // This is just the default Boring TLS supported signature scheme list
     //   with ed25519 added at the top of the preference order.
@@ -247,12 +262,14 @@ async fn connect_tls<S: AsyncDuplexStream>(
     transport: S,
     connection_params: &TransportConnectionParams,
     alpn: Alpn,
+    min_protocol_version: Option<boring_signal::ssl::SslVersion>,
     log_tag: Arc<str>,
 ) -> Result<SslStream<S>, TransportConnectError> {
     let route = TlsRouteFragment {
         root_certs: connection_params.certs.clone(),
         sni: Host::Domain(Arc::clone(&connection_params.sni)),
         alpn: Some(alpn),
+        min_protocol_version,
     };
 
     StatelessTls.connect_over(transport, route, log_tag).await
@@ -528,5 +545,54 @@ mod test {
                 assert_matches!(e, TransportConnectError::InvalidConfiguration);
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_tcp_connection_timeout() {
+        // 192.0.2.0/24 is reserved for documentation (TEST-NET-1) and should never connect
+        let unreachable_ip = "192.0.2.1".parse::<IpAddr>().unwrap();
+        // This is the discard service port, to make it even more obvious that we're not
+        // connecting to a real server.
+        let port = NonZeroU16::new(9).unwrap();
+
+        let route = TcpRoute {
+            address: unreachable_ip,
+            port,
+        };
+
+        let start = tokio::time::Instant::now();
+
+        let connector = StatelessTcp;
+        let result = connector.connect_over((), route, Arc::from("test")).await;
+
+        assert_matches!(result, Err(TransportConnectError::TcpConnectionFailed));
+
+        let elapsed = start.elapsed();
+        assert_eq!(
+            elapsed,
+            crate::timeouts::TCP_CONNECTION_TIMEOUT,
+            "Expected timeout after {:?}, but took {:?}",
+            crate::timeouts::TCP_CONNECTION_TIMEOUT,
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tcp_connection_success() {
+        // Create a local server that we can connect to
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server_handle = tokio::spawn(async move {
+            let (_, _) = listener.accept().await.unwrap();
+        });
+
+        let connector = StatelessTcp;
+        let route = TcpRoute {
+            address: addr.ip(),
+            port: NonZeroU16::new(addr.port()).unwrap(),
+        };
+
+        let result = connector.connect_over((), route, Arc::from("test")).await;
+        assert!(result.is_ok(), "TCP connection should succeed");
     }
 }

@@ -6,6 +6,7 @@ use std::error::Error;
 use std::fmt::{Debug, Display};
 use std::io::Error as IoError;
 use std::marker::PhantomData;
+use std::ptr::NonNull;
 
 use attest::enclave::Error as EnclaveError;
 use attest::hsm_enclave::Error as HsmEnclaveError;
@@ -65,6 +66,7 @@ pub type JavaByteBufferArray<'a> = JObjectArray<'a>;
 pub type JavaObject<'a> = JObject<'a>;
 pub type JavaUUID<'a> = JObject<'a>;
 pub type JavaCiphertextMessage<'a> = JObject<'a>;
+pub type JavaSignedPublicPreKey<'a> = JObject<'a>;
 pub type JavaMap<'a> = JObject<'a>;
 
 /// Return type marker for `bridge_fn`s that return Result, which gen_java_decl.py will pick out
@@ -522,10 +524,11 @@ impl MessageOnlyExceptionJniError for signal_media::sanitize::webp::ParseErrorRe
 
 mod registration {
     use libsignal_core::try_scoped;
+    use libsignal_net::auth::Auth;
     use libsignal_net::registration::{
-        CreateSessionError, InvalidSessionId, RequestError, RequestVerificationCodeError,
-        ResumeSessionError, SubmitVerificationError, UpdateSessionError,
-        VerificationCodeNotDeliverable,
+        CheckSvr2CredentialsError, CreateSessionError, InvalidSessionId, RegisterAccountError,
+        RegistrationLock, RequestError, RequestVerificationCodeError, ResumeSessionError,
+        SubmitVerificationError, UpdateSessionError, VerificationCodeNotDeliverable,
     };
 
     use super::*;
@@ -681,6 +684,62 @@ mod registration {
                 }
                 SubmitVerificationError::RetryLater(retry_later) => retry_later.to_throwable(env),
             }
+        }
+    }
+
+    impl MessageOnlyExceptionJniError for CheckSvr2CredentialsError {
+        fn exception_class(&self) -> ClassName<'static> {
+            match self {
+                CheckSvr2CredentialsError::CredentialsCouldNotBeParsed => {
+                    ClassName("org.signal.libsignal.net.RegistrationException")
+                }
+            }
+        }
+    }
+
+    impl JniError for RegisterAccountError {
+        fn to_throwable<'a>(
+            &self,
+            env: &mut JNIEnv<'a>,
+        ) -> Result<JThrowable<'a>, BridgeLayerError> {
+            let class_name = match self {
+                RegisterAccountError::RetryLater(retry_later) => {
+                    return retry_later.to_throwable(env)
+                }
+                RegisterAccountError::RegistrationLock(registration_lock) => {
+                    let class_name =
+                        ClassName("org.signal.libsignal.net.RegistrationLockException");
+                    let RegistrationLock {
+                        time_remaining,
+                        svr2_credentials,
+                    } = registration_lock;
+                    let time_remaining_seconds: i64 =
+                        time_remaining.as_secs().try_into().map_err(|_| {
+                            BridgeLayerError::IntegerOverflow(
+                                "RegistrationLock.time_remaining_seconds too large".to_owned(),
+                            )
+                        })?;
+                    let (svr2_username, svr2_password) = try_scoped(|| {
+                        let Auth { username, password } = svr2_credentials;
+                        Ok((env.new_string(username)?, env.new_string(password)?))
+                    })
+                    .check_exceptions(env, "RegisterAccountError::to_throwable")?;
+                    return new_instance(
+                        env,
+                        class_name,
+                        jni_args!((time_remaining_seconds => long, svr2_username => java.lang.String, svr2_password => java.lang.String) -> void),
+                    )
+                    .map(Into::into);
+                }
+                RegisterAccountError::DeviceTransferIsPossibleButNotSkipped => {
+                    ClassName("org.signal.libsignal.net.DeviceTransferPossibleException")
+                }
+                RegisterAccountError::RegistrationRecoveryVerificationFailed => {
+                    ClassName("org.signal.libsignal.net.RegistrationRecoveryFailedException")
+                }
+            };
+
+            make_single_message_throwable(env, &self.to_string(), class_name)
         }
     }
 }
@@ -844,28 +903,6 @@ where
             R::default()
         }
     }
-}
-
-/// Casts the given handle as a `&T`.
-///
-/// # Safety
-///
-/// The caller must ensure that the provided handle is in fact the Java
-/// representation of a pointer to a value of type `T`, and that the pointer
-/// remains valid as long as the returned reference is around.
-pub unsafe fn native_handle_cast<'l, T>(
-    handle: ObjectHandle,
-) -> Result<&'l mut T, BridgeLayerError> {
-    /*
-    Should we try testing the encoded pointer for sanity here, beyond
-    being null? For example verifying that lowest bits are zero,
-    highest bits are zero, greater than 64K, etc?
-    */
-    if handle == 0 {
-        return Err(BridgeLayerError::NullPointer(None));
-    }
-
-    Ok(&mut *(handle as *mut T))
 }
 
 /// Calls a method and translates any thrown exceptions to
@@ -1045,7 +1082,7 @@ pub fn with_local_frame_returning_local<'env>(
 ///
 /// The Java method is assumed to return a type that implements the
 /// `NativeHandleGuard.Owner` interface.
-pub fn get_object_with_native_handle<T: 'static + Clone, const LEN: usize>(
+pub fn get_object_with_native_handle<T: BridgeHandle + Clone, const LEN: usize>(
     env: &mut JNIEnv,
     store_obj: &JObject,
     callback_args: JniArgs<JObject<'_>, LEN>,
@@ -1076,7 +1113,7 @@ pub fn get_object_with_native_handle<T: 'static + Clone, const LEN: usize>(
             return Ok(None);
         }
 
-        let object = unsafe { native_handle_cast::<T>(handle)? };
+        let object = unsafe { T::native_handle_cast(handle)?.as_ref() };
         Ok(Some(object.clone()))
     })
 }
@@ -1163,11 +1200,47 @@ macro_rules! jni_bridge_handle_destroy {
                 handle: $crate::jni::ObjectHandle,
             ) {
                 if handle != 0 {
-                    let _boxed_value = Box::from_raw(handle as *mut $typ);
+                    drop(Box::from_raw(
+                        <$typ as $crate::jni::BridgeHandle>::native_handle_cast(handle)
+                            .expect("valid")
+                            .as_mut(),
+                    ));
                 }
             }
         }
     };
+}
+
+/// A constant **non-cryptographic** hash function for type tagging purposes.
+///
+/// With only 8 bits collisions are certainly possible, but hopefully uncommon enough to still catch
+/// simple mistakes, especially since mistaken types are probably defined near each other.
+pub const fn hash_location_for_type_tag(file: &'static str, line: u32) -> u8 {
+    // A const implementation of FNV-1a, a simple hash function in the public domain.
+    // http://www.isthe.com/chongo/tech/comp/fnv/index.html
+    const fn update(mut hash: u32, b: u8) -> u32 {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(16777619u32);
+        hash
+    }
+
+    let mut hash = 2166136261u32;
+
+    let mut i = 0;
+    while i < file.len() {
+        hash = update(hash, file.as_bytes()[i]);
+        i += 1;
+    }
+    let [line_a, line_b, line_c, line_d] = line.to_le_bytes();
+    hash = update(hash, line_a);
+    hash = update(hash, line_b);
+    hash = update(hash, line_c);
+    hash = update(hash, line_d);
+
+    // One level of XOR-folding, as recommended by the section
+    // "For tiny x < 16 bit values, we recommend using a 32 bit FNV-1 hash as follows":
+    hash ^= hash >> 8;
+    (hash & 0xFF) as u8
 }
 
 /// A wrapper around a cloned [`JNIEnv`] that forces scoped use.

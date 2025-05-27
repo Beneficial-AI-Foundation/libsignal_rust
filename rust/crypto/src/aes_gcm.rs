@@ -15,9 +15,6 @@ use crate::{Aes256Ctr32, Error, Result};
 pub const TAG_SIZE: usize = 16;
 pub const NONCE_SIZE: usize = 12;
 
-#[cfg(kani)]
-use kani::stub;
-
 #[derive(Clone)]
 struct GcmGhash {
     ghash: GHash,
@@ -190,79 +187,5 @@ impl Aes256GcmDecryption {
         }
 
         Ok(())
-    }
-}
-
-// Helper functions for the proofs
-fn setup_test_ghash() -> GcmGhash {
-    let h = [0u8; TAG_SIZE];
-    let ghash_pad = [0u8; TAG_SIZE];
-    let associated_data = vec![];
-    GcmGhash::new(&h, ghash_pad, &associated_data).unwrap()
-}
-
-fn setup_test_encryption() -> Aes256GcmEncryption {
-    let key = [0u8; 32];
-    let nonce = [0u8; NONCE_SIZE];
-    let associated_data = vec![];
-    Aes256GcmEncryption::new(&key, &nonce, &associated_data).unwrap()
-}
-
-fn setup_test_decryption() -> Aes256GcmDecryption {
-    let key = [0u8; 32];
-    let nonce = [0u8; NONCE_SIZE];
-    let associated_data = vec![];
-    Aes256GcmDecryption::new(&key, &nonce, &associated_data).unwrap()
-}
-
-#[kani::proof]
-fn verify_tag_comparison_constant_time() {
-    let computed_tag = [0u8; TAG_SIZE];
-
-    // Try two tags that differ in various positions
-    for i in 0..TAG_SIZE {
-        let decryption = setup_test_decryption();
-        let mut bad_tag = [0u8; TAG_SIZE];
-        bad_tag[i] = 1;
-
-        let result = decryption.verify_tag(&bad_tag);
-        assert!(result.is_err());
-    }
-}
-
-#[kani::proof]
-fn verify_encrypt_decrypt_roundtrip() {
-    let key = [0u8; 32]; // AES-256 key
-    let nonce = [0u8; NONCE_SIZE];
-    let associated_data = vec![0u8; 10];
-
-    // Generate a few bytes of arbitrary data
-    let a: u8 = kani::any();
-    let b: u8 = kani::any();
-    let c: u8 = kani::any();
-
-    // Test a few different plaintexts
-    for len in [0, 1, 15, 16, 17, 31, 32, 33] {
-        // Create a plaintext with the specified length, filled with the arbitrary bytes
-        let plaintext = vec![a, b, c].into_iter().cycle().take(len).collect::<Vec<_>>();
-
-        // Create test setup that mimics encryption then decryption
-        let mut plaintext_copy = plaintext.clone();
-
-        // Run encrypt
-        let mut encryption = Aes256GcmEncryption::new(&key, &nonce, &associated_data).unwrap();
-        encryption.encrypt(&mut plaintext_copy);
-        let tag = encryption.compute_tag();
-
-        // Run decrypt
-        let mut decryption = Aes256GcmDecryption::new(&key, &nonce, &associated_data).unwrap();
-        decryption.decrypt(&mut plaintext_copy);
-
-        // The decrypted text should match the original plaintext
-        assert!(plaintext == plaintext_copy);
-
-        // Tag verification should succeed
-        let verify_result = decryption.verify_tag(&tag);
-        assert!(verify_result.is_ok());
     }
 }

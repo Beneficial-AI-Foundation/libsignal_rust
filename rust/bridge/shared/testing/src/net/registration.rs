@@ -4,7 +4,6 @@
 //
 
 use std::collections::HashSet;
-use std::panic::UnwindSafe;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -15,20 +14,25 @@ use libsignal_bridge_types::net::registration::{
     ConnectChatBridge, RegistrationCreateSessionRequest, RegistrationService,
 };
 use libsignal_bridge_types::net::TokioAsyncContext;
+use libsignal_net::auth::Auth;
 use libsignal_net::chat::fake::FakeChatRemote;
 use libsignal_net::chat::ChatConnection;
 use libsignal_net::infra::errors::RetryLater;
 use libsignal_net::registration::{
-    ConnectChat, CreateSessionError, RegistrationSession, RequestError,
+    CheckSvr2CredentialsError, CheckSvr2CredentialsResponse, ConnectChat, CreateSessionError,
+    RegisterAccountError, RegisterAccountResponse, RegisterResponseBackup, RegisterResponseBadge,
+    RegisterResponseEntitlements, RegistrationLock, RegistrationSession, RequestError,
     RequestVerificationCodeError, RequestedInformation, ResumeSessionError,
-    SubmitVerificationError, UpdateSessionError, VerificationCodeNotDeliverable,
+    SubmitVerificationError, Svr2CredentialsResult, UpdateSessionError,
+    VerificationCodeNotDeliverable,
 };
+use uuid::uuid;
 
 use super::make_error_testing_enum;
 use crate::net::chat::FakeChatServer;
 use crate::*;
 
-#[bridge_fn(ffi = false)]
+#[bridge_fn]
 pub fn TESTING_RegistrationSessionInfoConvert() -> RegistrationSession {
     RegistrationSession {
         allowed_to_request_code: true,
@@ -40,6 +44,21 @@ pub fn TESTING_RegistrationSessionInfoConvert() -> RegistrationSession {
     }
 }
 
+#[bridge_fn]
+pub fn TESTING_RegistrationService_CheckSvr2CredentialsResponseConvert(
+) -> CheckSvr2CredentialsResponse {
+    CheckSvr2CredentialsResponse {
+        matches: [
+            ("username:pass-match", Svr2CredentialsResult::Match),
+            ("username:pass-no-match", Svr2CredentialsResult::NoMatch),
+            ("username:pass-invalid", Svr2CredentialsResult::Invalid),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect(),
+    }
+}
+
 #[derive(Clone)]
 struct ConnectFakeChat(
     tokio::runtime::Handle,
@@ -47,8 +66,6 @@ struct ConnectFakeChat(
 );
 
 struct ConnectFakeChatBridge(tokio::sync::mpsc::UnboundedSender<FakeChatRemote>);
-
-impl UnwindSafe for ConnectFakeChat {}
 
 impl ConnectChatBridge for ConnectFakeChatBridge {
     fn create_chat_connector(
@@ -83,7 +100,7 @@ impl ConnectChat for ConnectFakeChat {
     }
 }
 
-#[bridge_io(TokioAsyncContext, ffi = false)]
+#[bridge_io(TokioAsyncContext)]
 async fn TESTING_FakeRegistrationSession_CreateSession(
     create_session: RegistrationCreateSessionRequest,
     chat: &FakeChatServer,
@@ -94,6 +111,38 @@ async fn TESTING_FakeRegistrationSession_CreateSession(
         create_session,
     )
     .await
+}
+
+#[bridge_fn]
+fn TESTING_RegisterAccountResponse_CreateTestValue() -> RegisterAccountResponse {
+    RegisterAccountResponse {
+        aci: uuid!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").into(),
+        number: "+18005550123".to_owned(),
+        pni: uuid!("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").into(),
+        username_hash: Some((*b"username-hash").into()),
+        username_link_handle: Some(uuid!("55555555-5555-5555-5555-555555555555")),
+        storage_capable: true,
+        entitlements: RegisterResponseEntitlements {
+            badges: [
+                RegisterResponseBadge {
+                    id: "first".to_owned(),
+                    visible: true,
+                    expiration: Duration::from_secs(123456),
+                },
+                RegisterResponseBadge {
+                    id: "second".to_owned(),
+                    visible: false,
+                    expiration: Duration::from_secs(555),
+                },
+            ]
+            .into(),
+            backup: Some(RegisterResponseBackup {
+                backup_level: 123,
+                expiration: Duration::from_secs(888888),
+            }),
+        },
+        reregistration: true,
+    }
 }
 
 // Use aliases so that places that refer to syntactic argument names (e.g.
@@ -109,6 +158,11 @@ type TestingRequestVerificationCodeRequestError =
     TestingRequestError<TestingRequestVerificationCodeError>;
 /// cbindgen:ignore
 type TestingSubmitVerificationRequestError = TestingRequestError<TestingSubmitVerificationError>;
+/// cbindgen:ignore
+type TestingRegisterAccountRequestError = TestingRequestError<TestingRegisterAccountError>;
+/// cbindgen:ignore
+type TestingCheckSvr2CredentialsRequestError =
+    TestingRequestError<TestingCheckSvr2CredentialsError>;
 
 struct TestingRequestError<E>(RequestError<E>);
 
@@ -156,7 +210,7 @@ make_error_testing_enum!(
 );
 
 /// Return an error matching the requested description.
-#[bridge_fn(ffi = false)]
+#[bridge_fn]
 fn TESTING_RegistrationService_CreateSessionErrorConvert(
     // The stringly-typed API makes the call sites more self-explanatory.
     error_description: AsType<TestingCreateSessionRequestError, String>,
@@ -179,7 +233,7 @@ make_error_testing_enum!(
 );
 
 /// Return an error matching the requested description.
-#[bridge_fn(ffi = false)]
+#[bridge_fn]
 fn TESTING_RegistrationService_ResumeSessionErrorConvert(
     // The stringly-typed API makes the call sites more self-explanatory.
     error_description: AsType<TestingResumeSessionRequestError, String>,
@@ -200,7 +254,7 @@ make_error_testing_enum!(
 );
 
 /// Return an error matching the requested description.
-#[bridge_fn(ffi = false)]
+#[bridge_fn]
 fn TESTING_RegistrationService_UpdateSessionErrorConvert(
     // The stringly-typed API makes the call sites more self-explanatory.
     error_description: AsType<TestingUpdateSessionRequestError, String>,
@@ -227,7 +281,7 @@ make_error_testing_enum!(
 );
 
 /// Return an error matching the requested description.
-#[bridge_fn(ffi = false)]
+#[bridge_fn]
 fn TESTING_RegistrationService_RequestVerificationCodeErrorConvert(
     // The stringly-typed API makes the call sites more self-explanatory.
     error_description: AsType<TestingRequestVerificationCodeRequestError, String>,
@@ -269,7 +323,7 @@ make_error_testing_enum!(
 );
 
 /// Return an error matching the requested description.
-#[bridge_fn(ffi = false)]
+#[bridge_fn]
 fn TESTING_RegistrationService_SubmitVerificationErrorConvert(
     // The stringly-typed API makes the call sites more self-explanatory.
     error_description: AsType<TestingSubmitVerificationRequestError, String>,
@@ -288,6 +342,66 @@ fn TESTING_RegistrationService_SubmitVerificationErrorConvert(
             }
             TestingSubmitVerificationError::RetryAfter42Seconds => {
                 SubmitVerificationError::RetryLater(RETRY_AFTER_42_SECONDS)
+            }
+        }))
+}
+
+make_error_testing_enum!(
+    enum TestingCheckSvr2CredentialsError for CheckSvr2CredentialsError {
+        CredentialsCouldNotBeParsed => CredentialsCouldNotBeParsed,
+    }
+);
+
+/// Return an error matching the requested description.
+#[bridge_fn]
+fn TESTING_RegistrationService_CheckSvr2CredentialsErrorConvert(
+    // The stringly-typed API makes the call sites more self-explanatory.
+    error_description: AsType<TestingCheckSvr2CredentialsRequestError, String>,
+) -> Result<(), RequestError<CheckSvr2CredentialsError>> {
+    Err(error_description
+        .into_inner()
+        .map_into_error(|inner| match inner {
+            TestingCheckSvr2CredentialsError::CredentialsCouldNotBeParsed => {
+                CheckSvr2CredentialsError::CredentialsCouldNotBeParsed
+            }
+        }))
+}
+
+make_error_testing_enum!(
+    enum TestingRegisterAccountError for RegisterAccountError {
+        DeviceTransferIsPossibleButNotSkipped => DeviceTransferIsPossibleButNotSkipped,
+        RegistrationRecoveryVerificationFailed => RegistrationRecoveryVerificationFailed,
+        RegistrationLock => RegistrationLockFor50Seconds,
+        RetryLater => RetryAfter42Seconds,
+    }
+);
+
+/// Return an error matching the requested description.
+#[bridge_fn]
+fn TESTING_RegistrationService_RegisterAccountErrorConvert(
+    // The stringly-typed API makes the call sites more self-explanatory.
+    error_description: AsType<TestingRegisterAccountRequestError, String>,
+) -> Result<(), RequestError<RegisterAccountError>> {
+    Err(error_description
+        .into_inner()
+        .map_into_error(|inner| match inner {
+            TestingRegisterAccountError::RetryAfter42Seconds => {
+                RegisterAccountError::RetryLater(RETRY_AFTER_42_SECONDS)
+            }
+            TestingRegisterAccountError::DeviceTransferIsPossibleButNotSkipped => {
+                RegisterAccountError::DeviceTransferIsPossibleButNotSkipped
+            }
+            TestingRegisterAccountError::RegistrationRecoveryVerificationFailed => {
+                RegisterAccountError::RegistrationRecoveryVerificationFailed
+            }
+            TestingRegisterAccountError::RegistrationLockFor50Seconds => {
+                RegisterAccountError::RegistrationLock(RegistrationLock {
+                    time_remaining: Duration::from_secs(50),
+                    svr2_credentials: Auth {
+                        username: "user".to_owned(),
+                        password: "pass".to_owned(),
+                    },
+                })
             }
         }))
 }

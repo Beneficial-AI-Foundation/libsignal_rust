@@ -202,7 +202,7 @@ pub async fn message_decrypt_prekey<R: Rng + CryptoRng>(
         .unwrap_or_else(SessionRecord::new_fresh);
 
     // Make sure we log the session state if we fail to process the pre-key.
-    let pre_key_used_or_err = session::process_prekey(
+    let process_prekey_result = session::process_prekey(
         ciphertext,
         remote_address,
         &mut session_record,
@@ -213,7 +213,7 @@ pub async fn message_decrypt_prekey<R: Rng + CryptoRng>(
     )
     .await;
 
-    let pre_key_used = match pre_key_used_or_err {
+    let (pre_key_used, identity_to_save) = match process_prekey_result {
         Ok(result) => result,
         Err(e) => {
             let errs = [e];
@@ -238,6 +238,13 @@ pub async fn message_decrypt_prekey<R: Rng + CryptoRng>(
         CiphertextMessageType::PreKey,
         csprng,
     )?;
+
+    identity_store
+        .save_identity(
+            identity_to_save.remote_address,
+            identity_to_save.their_identity_key,
+        )
+        .await?;
 
     session_store
         .store_session(remote_address, &session_record)
@@ -461,10 +468,20 @@ fn decrypt_message_with_record<R: Rng + CryptoRng>(
             }
             Err(e) => {
                 log_decryption_failure(&current_state, &e);
+                errs.push(e);
                 match original_message_type {
                     CiphertextMessageType::PreKey => {
                         // A PreKey message creates a session and then decrypts a Whisper message
                         // using that session. No need to check older sessions.
+                        log::error!(
+                            "{}",
+                            create_decryption_failure_log(
+                                remote_address,
+                                &errs,
+                                record,
+                                ciphertext
+                            )?
+                        );
                         // Note that we don't propagate `e` here; we always return InvalidMessage,
                         // as we would for a Whisper message that tried several sessions.
                         return Err(SignalProtocolError::InvalidMessage(
@@ -477,7 +494,6 @@ fn decrypt_message_with_record<R: Rng + CryptoRng>(
                         unreachable!("should not be using Double Ratchet for these")
                     }
                 }
-                errs.push(e);
             }
         }
     }
